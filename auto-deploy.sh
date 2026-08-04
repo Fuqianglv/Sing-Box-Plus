@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
-# Debian 13/Ubuntu 自动部署：9 个直连节点并强制更新 Gist 订阅。
-# 配置生成函数复用同仓库 sing-box-plus.sh，避免维护两套协议实现。
+# Debian 13 / Ubuntu：部署 9 个直连节点并强制更新 Gist 订阅。
+# 第一个位置参数为 GH_TOKEN，第二个位置参数为可选 GIST_ID。
 
 REPO_RAW="https://raw.githubusercontent.com/Fuqianglv/Sing-Box-Plus/main"
 DEFAULT_GIST_ID="85a7d7b63d151e78558a4737aca3ce02"
@@ -20,19 +20,12 @@ USE_IPV6=0
 ROLLBACK=0
 
 log(){ printf '\n========== %s ==========\n' "$*"; }
-die(){ echo "[ERROR] $*" >&2; exit 1; }
+warn(){ echo "[警告] $*" >&2; }
+die(){ echo "[错误] $*" >&2; exit 1; }
 
 # 推荐调用：bash <(curl -fsSL URL) GH_TOKEN [GIST_ID] [选项]
-# 第一个非选项参数是 Token，第二个非选项参数是可选 Gist ID。
-if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
-  GH_TOKEN="$1"
-  shift
-fi
-if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
-  GIST_ID="$1"
-  shift
-fi
-
+if [[ -n "${1:-}" && "${1:-}" != --* ]]; then GH_TOKEN="$1"; shift; fi
+if [[ -n "${1:-}" && "${1:-}" != --* ]]; then GIST_ID="$1"; shift; fi
 while (($#)); do
   case "$1" in
     --rotate) ROTATE=1 ;;
@@ -40,12 +33,9 @@ while (($#)); do
     --gist-id) shift; GIST_ID="${1:?--gist-id 缺少参数}" ;;
     -h|--help)
       cat <<'HELP'
-用法：
-  auto-deploy.sh GH_TOKEN [GIST_ID] [--rotate] [--ipv6]
-
+用法：auto-deploy.sh GH_TOKEN [GIST_ID] [--rotate] [--ipv6]
 默认 GIST_ID：85a7d7b63d151e78558a4737aca3ce02
-每次执行都会重新生成本地订阅并强制 PATCH 更新该 Gist。
-默认保留已有凭据和端口；--rotate 会全部换新；--ipv6 强制生成 IPv6 节点。
+每次执行都会强制更新订阅；默认保留端口和凭据。
 HELP
       exit 0 ;;
     *) die "未知参数：$1" ;;
@@ -67,7 +57,8 @@ cleanup(){
   if ((rc != 0 && ROLLBACK)); then
     echo "部署失败，恢复旧配置……" >&2
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    rm -rf "$SB_DIR"; rm -f "$BIN" "/etc/systemd/system/$SERVICE"
+    rm -rf "$SB_DIR"
+    rm -f "$BIN" "/etc/systemd/system/$SERVICE"
     [[ -s "$BACKUP/files.tar.gz" ]] && tar -C / -xzpf "$BACKUP/files.tar.gz"
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart "$SERVICE" >/dev/null 2>&1 || true
@@ -81,7 +72,7 @@ trap cleanup EXIT
 [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请用 root 执行"
 source /etc/os-release
 case "${ID:-}:${ID_LIKE:-}" in debian:*|ubuntu:*|*:debian*) ;; *) die "仅支持 Debian/Ubuntu" ;; esac
-[[ "$(ps -p 1 -o comm= | xargs)" == systemd ]] || die "需要 systemd；不支持普通 Docker 容器"
+[[ "$(ps -p 1 -o comm= | xargs)" == systemd ]] || die "需要 systemd"
 
 log "1. 安装依赖"
 export DEBIAN_FRONTEND=noninteractive
@@ -99,7 +90,6 @@ GIST_CHECK_CODE="$(curl -sS -o "$TMP/gist-check.json" -w '%{http_code}' \
   -H 'X-GitHub-Api-Version: 2022-11-28' \
   "https://api.github.com/gists/$GIST_ID")"
 [[ "$GIST_CHECK_CODE" == 200 ]] || { cat "$TMP/gist-check.json"; die "读取 Gist 失败，HTTP $GIST_CHECK_CODE"; }
-
 USER_CHECK_CODE="$(curl -sS -o "$TMP/user-check.json" -w '%{http_code}' \
   -H "Authorization: Bearer $GH_TOKEN" \
   -H 'Accept: application/vnd.github+json' \
@@ -108,8 +98,7 @@ USER_CHECK_CODE="$(curl -sS -o "$TMP/user-check.json" -w '%{http_code}' \
 [[ "$USER_CHECK_CODE" == 200 ]] || { cat "$TMP/user-check.json"; die "Token 校验失败，HTTP $USER_CHECK_CODE"; }
 GIST_OWNER="$(jq -r '.owner.login // empty' "$TMP/gist-check.json")"
 TOKEN_OWNER="$(jq -r '.login // empty' "$TMP/user-check.json")"
-[[ -n "$GIST_OWNER" && -n "$TOKEN_OWNER" ]] || die "无法识别 GitHub 用户或 Gist 所有者"
-[[ "$GIST_OWNER" == "$TOKEN_OWNER" ]] || die "Token 用户 $TOKEN_OWNER 不是 Gist 所有者 $GIST_OWNER"
+[[ -n "$GIST_OWNER" && "$GIST_OWNER" == "$TOKEN_OWNER" ]] || die "Token 用户不是该 Gist 所有者"
 echo "Token 用户：$TOKEN_OWNER"
 echo "Gist ID：$GIST_ID"
 
@@ -126,7 +115,6 @@ systemctl stop "$SERVICE" >/dev/null 2>&1 || true
 
 log "4. 下载部署库并选择网络"
 curl -fL --retry 3 "$REPO_RAW/sing-box-plus.sh" -o "$TMP/library.sh"
-# 去掉文件最后的 menu 调用，只加载函数。
 sed -e 's/^stty erase.*/stty erase ^H 2>\/dev\/null || true/' \
     -e 's/^menu$/# menu disabled for auto deploy/' \
     "$TMP/library.sh" >"$TMP/library-source.sh"
@@ -150,12 +138,11 @@ fi
 test_sni(){
   local n="$1" flag=-4
   ((LINK_MODE==6)) && flag=-6
-  curl "$flag" -sS --connect-timeout 6 --max-time 10 \
-    -o /dev/null "https://$n" >/dev/null 2>&1
+  curl "$flag" -sS --connect-timeout 6 --max-time 10 -o /dev/null "https://$n" >/dev/null 2>&1
 }
 OLD_SNI="$(sed -n 's/^REALITY_SERVER=//p' "$SB_DIR/env.conf" 2>/dev/null | head -n1 || true)"
 REALITY_SERVER=""
-for n in "$OLD_SNI" www.microsoft.com www.apple.com www.cloudflare.com www.amazon.com; do
+for n in "$OLD_SNI" www.microsoft.com www.apple.com www.amazon.com www.cloudflare.com; do
   [[ -n "$n" ]] || continue
   test_sni "$n" && { REALITY_SERVER="$n"; break; }
 done
@@ -170,13 +157,10 @@ if ((ROTATE)); then
   rm -rf "$SB_DIR/cert"
 fi
 mkdir -p "$SB_DIR"
-
-# 新部署/换端口时，将 9 个端口设为连续区间，方便云防火墙一次放行。
 if ((ROTATE)) || [[ ! -s "$SB_DIR/ports.env" ]]; then
   found=""
   for _ in {1..200}; do
-    base=$((20000 + RANDOM % 30000))
-    busy=0
+    base=$((20000 + RANDOM % 30000)); busy=0
     for ((p=base;p<=base+8;p++)); do
       ss -H -lntup 2>/dev/null | grep -qE ":${p}([[:space:]]|$)" && { busy=1; break; }
     done
@@ -188,16 +172,12 @@ if ((ROTATE)) || [[ ! -s "$SB_DIR/ports.env" ]]; then
   PORT_SS2022=$((found+6)); PORT_SS=$((found+7)); PORT_TUIC=$((found+8))
 fi
 
-# 强制下载当前最新稳定版核心；配置/凭据仍由库函数复用。
 rm -f "$BIN"
 sbp_bootstrap
 install_singbox
 ENABLE_WARP=false
-# 避免旧 env.conf 覆盖本次自动选择的 SNI/WARP 设置。
 rm -f "$SB_DIR/env.conf"
 write_config
-
-# 仅保留前 9 个直连入站，并明确使用所选地址族监听。
 jq --arg listen "$LISTEN_ADDR" --arg strategy "$( ((LINK_MODE==6)) && echo prefer_ipv6 || echo prefer_ipv4 )" '
   .dns = {servers:[{type:"local",tag:"local"}],strategy:$strategy}
   | .inbounds = (.inbounds[:9] | map(.listen=$listen))
@@ -211,7 +191,6 @@ systemctl restart "$SERVICE"
 systemctl is-active --quiet "$SERVICE" || die "sing-box 启动失败"
 enable_bbr
 
-# 重新加载实际端口。
 load_ports
 TCP_PORTS=("$PORT_VLESSR" "$PORT_VLESS_GRPCR" "$PORT_TROJANR" "$PORT_VMESS_WS" "$PORT_SS2022" "$PORT_SS")
 UDP_PORTS=("$PORT_HY2" "$PORT_HY2_OBFS" "$PORT_TUIC" "$PORT_SS2022" "$PORT_SS")
@@ -224,33 +203,67 @@ for p in "${UDP_PORTS[@]}"; do
   command -v ip6tables >/dev/null && { ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT; }
 done
 netfilter-persistent save >/dev/null 2>&1 || true
-for p in "${TCP_PORTS[@]}"; do
-  ss -H -lnt | awk -v p=":$p" '$4 ~ p"$"{ok=1} END{exit !ok}' || die "TCP 端口 $p 未监听"
-done
-for p in "${UDP_PORTS[@]}"; do
-  ss -H -lnu | awk -v p=":$p" '$4 ~ p"$"{ok=1} END{exit !ok}' || die "UDP 端口 $p 未监听"
-done
+for p in "${TCP_PORTS[@]}"; do ss -H -lnt | awk -v p=":$p" '$4 ~ p"$"{ok=1} END{exit !ok}' || die "TCP 端口 $p 未监听"; done
+for p in "${UDP_PORTS[@]}"; do ss -H -lnu | awk -v p=":$p" '$4 ~ p"$"{ok=1} END{exit !ok}' || die "UDP 端口 $p 未监听"; done
 
-log "6. Reality 本机回环自测"
+log "6. 使用 Xray Core 验证 Reality"
 load_creds
-TEST_SERVER="127.0.0.1"; ((LINK_MODE==6)) && TEST_SERVER="::1"
-TEST_PORT=10998
-while ss -H -lnt | grep -q ":$TEST_PORT "; do TEST_PORT=$((TEST_PORT+1)); done
-jq -n --arg u "$UUID" --arg s "$REALITY_SERVER" --arg p "$REALITY_PUB" --arg i "$REALITY_SID" --arg ts "$TEST_SERVER" \
-  --argjson rp "$PORT_VLESSR" --argjson lp "$TEST_PORT" '
- {log:{level:"error"},inbounds:[{type:"socks",listen:"127.0.0.1",listen_port:$lp}],
-  outbounds:[{type:"vless",tag:"p",server:$ts,server_port:$rp,uuid:$u,flow:"xtls-rprx-vision",
-   tls:{enabled:true,server_name:$s,utls:{enabled:true,fingerprint:"chrome"},reality:{enabled:true,public_key:$p,short_id:$i}}}],
-  route:{final:"p"}}' >"$TMP/test.json"
-"$BIN" run -c "$TMP/test.json" >"$TMP/test.log" 2>&1 & pid=$!
-sleep 1
-curl -fsS --max-time 15 --socks5-hostname "127.0.0.1:$TEST_PORT" \
-  https://www.cloudflare.com/cdn-cgi/trace >/dev/null || { cat "$TMP/test.log" >&2; kill "$pid" || true; die "Reality 自测失败"; }
-kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
-echo "Reality 自测通过"
+XRAY_ARCH=""
+case "$(uname -m)" in
+  x86_64|amd64) XRAY_ARCH='Xray-linux-64\.zip$' ;;
+  aarch64|arm64) XRAY_ARCH='Xray-linux-arm64-v8a\.zip$' ;;
+esac
+XRAY_BIN=""
+if [[ -n "$XRAY_ARCH" ]]; then
+  XRAY_URL="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+    | jq -r --arg re "$XRAY_ARCH" '.assets[] | select(.name|test($re)) | .browser_download_url' | head -n1 || true)"
+  if [[ -n "$XRAY_URL" && "$XRAY_URL" != null ]]; then
+    mkdir -p "$TMP/xray"
+    if curl -fL --retry 3 "$XRAY_URL" -o "$TMP/xray.zip" && unzip -q "$TMP/xray.zip" -d "$TMP/xray"; then
+      XRAY_BIN="$(find "$TMP/xray" -type f -iname xray | head -n1)"
+      [[ -n "$XRAY_BIN" ]] && chmod 700 "$XRAY_BIN"
+    fi
+  fi
+fi
+
+if [[ -z "$XRAY_BIN" ]]; then
+  warn "Xray 测试核心下载失败，跳过 Reality 协议握手测试；服务和端口检查已通过"
+else
+  TEST_SERVER="127.0.0.1"; ((LINK_MODE==6)) && TEST_SERVER="::1"
+  TEST_PORT=10998
+  while ss -H -lnt | grep -qE ":${TEST_PORT}([[:space:]]|$)"; do TEST_PORT=$((TEST_PORT+1)); done
+  jq -n --arg u "$UUID" --arg s "$REALITY_SERVER" --arg p "$REALITY_PUB" --arg i "$REALITY_SID" --arg ts "$TEST_SERVER" \
+    --argjson rp "$PORT_VLESSR" --argjson lp "$TEST_PORT" '
+    {
+      log:{loglevel:"error"},
+      inbounds:[{listen:"127.0.0.1",port:$lp,protocol:"socks",settings:{udp:false}}],
+      outbounds:[{
+        tag:"proxy",protocol:"vless",
+        settings:{vnext:[{address:$ts,port:$rp,users:[{id:$u,encryption:"none",flow:"xtls-rprx-vision"}]}]},
+        streamSettings:{network:"tcp",security:"reality",realitySettings:{show:false,fingerprint:"chrome",serverName:$s,publicKey:$p,shortId:$i,spiderX:"/"}}
+      }]
+    }' >"$TMP/xray-test.json"
+  "$XRAY_BIN" run -c "$TMP/xray-test.json" >"$TMP/xray-test.log" 2>&1 & xpid=$!
+  sleep 1
+  if ! kill -0 "$xpid" 2>/dev/null; then
+    cat "$TMP/xray-test.log" >&2
+    die "Xray 测试核心启动失败"
+  fi
+  if ! curl -fsS --max-time 20 --socks5-hostname "127.0.0.1:$TEST_PORT" https://www.cloudflare.com/cdn-cgi/trace >/dev/null; then
+    echo "----- Xray 客户端日志 -----" >&2
+    cat "$TMP/xray-test.log" >&2 || true
+    echo "----- sing-box 服务日志 -----" >&2
+    journalctl -u "$SERVICE" -n 80 --no-pager >&2 || true
+    kill "$xpid" >/dev/null 2>&1 || true
+    wait "$xpid" 2>/dev/null || true
+    die "Reality 的 Xray 兼容性测试失败"
+  fi
+  kill "$xpid" >/dev/null 2>&1 || true
+  wait "$xpid" 2>/dev/null || true
+  echo "Reality 的 Xray 兼容性测试通过"
+fi
 
 log "7. 生成并强制更新订阅"
-# 仅截取 print_links_grouped 输出中的直连 9 个链接。
 print_links_grouped "$LINK_MODE" | awk '
  /【直连节点（9）】/{on=1;next}
  /【WARP 节点（9）】/{on=0}
@@ -276,13 +289,9 @@ verify_remote(){
   local local_file="$1" raw_url="$2" name="$3" local_hash remote_hash try
   local_hash="$(sha256sum "$local_file" | awk '{print $1}')"
   for try in 1 2 3 4 5; do
-    curl -fLsS -H 'Cache-Control: no-cache' \
-      "${raw_url}?nocache=$(date +%s%N)" -o "$TMP/remote-$name" || true
+    curl -fLsS -H 'Cache-Control: no-cache' "${raw_url}?nocache=$(date +%s%N)" -o "$TMP/remote-$name" || true
     remote_hash="$(sha256sum "$TMP/remote-$name" 2>/dev/null | awk '{print $1}' || true)"
-    if [[ "$local_hash" == "$remote_hash" ]]; then
-      echo "$name 远程校验通过：$local_hash"
-      return 0
-    fi
+    [[ "$local_hash" == "$remote_hash" ]] && { echo "$name 远程校验通过：$local_hash"; return 0; }
     sleep "$try"
   done
   die "$name 的 Gist 内容与本地不一致"
