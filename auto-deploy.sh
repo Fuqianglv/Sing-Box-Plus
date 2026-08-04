@@ -2,11 +2,13 @@
 set -Eeuo pipefail
 umask 077
 
-# Debian 13/Ubuntu 自动部署：9 个直连节点并更新 Gist 订阅。
+# Debian 13/Ubuntu 自动部署：9 个直连节点并强制更新 Gist 订阅。
 # 配置生成函数复用同仓库 sing-box-plus.sh，避免维护两套协议实现。
 
 REPO_RAW="https://raw.githubusercontent.com/Fuqianglv/Sing-Box-Plus/main"
-GIST_ID="${GIST_ID:-85a7d7b63d151e78558a4737aca3ce02}"
+DEFAULT_GIST_ID="85a7d7b63d151e78558a4737aca3ce02"
+GH_TOKEN="${GH_TOKEN:-}"
+GIST_ID="${GIST_ID:-$DEFAULT_GIST_ID}"
 SB_DIR="/opt/sing-box"
 BIN="/usr/local/bin/sing-box"
 CONF="$SB_DIR/config.json"
@@ -14,29 +16,49 @@ SERVICE="sing-box.service"
 TMP="$(mktemp -d /tmp/sbp-auto.XXXXXX)"
 BACKUP="/root/sing-box-backups/$(date +%Y%m%d-%H%M%S)"
 ROTATE=0
-NO_GIST=0
 USE_IPV6=0
 ROLLBACK=0
 
 log(){ printf '\n========== %s ==========\n' "$*"; }
 die(){ echo "[ERROR] $*" >&2; exit 1; }
 
+# 推荐调用：bash <(curl -fsSL URL) GH_TOKEN [GIST_ID] [选项]
+# 第一个非选项参数是 Token，第二个非选项参数是可选 Gist ID。
+if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+  GH_TOKEN="$1"
+  shift
+fi
+if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+  GIST_ID="$1"
+  shift
+fi
+
 while (($#)); do
   case "$1" in
     --rotate) ROTATE=1 ;;
-    --no-gist) NO_GIST=1 ;;
     --ipv6) USE_IPV6=1 ;;
     --gist-id) shift; GIST_ID="${1:?--gist-id 缺少参数}" ;;
     -h|--help)
       cat <<'HELP'
-用法：auto-deploy.sh [--rotate] [--no-gist] [--ipv6] [--gist-id ID]
-默认优先生成 IPv4 订阅，并保留已有凭据和端口。
+用法：
+  auto-deploy.sh GH_TOKEN [GIST_ID] [--rotate] [--ipv6]
+
+默认 GIST_ID：85a7d7b63d151e78558a4737aca3ce02
+每次执行都会重新生成本地订阅并强制 PATCH 更新该 Gist。
+默认保留已有凭据和端口；--rotate 会全部换新；--ipv6 强制生成 IPv6 节点。
 HELP
       exit 0 ;;
     *) die "未知参数：$1" ;;
   esac
   shift
 done
+
+if [[ -z "$GH_TOKEN" ]]; then
+  read -rsp "请输入 GitHub Token（需要 Gists 写权限）: " GH_TOKEN </dev/tty
+  echo
+fi
+[[ -n "$GH_TOKEN" ]] || die "GitHub Token 为空"
+[[ "$GIST_ID" =~ ^[0-9a-fA-F]{20,64}$ ]] || die "GIST_ID 格式不正确：$GIST_ID"
 
 cleanup(){
   rc=$?
@@ -70,7 +92,28 @@ apt-get install -y --no-install-recommends \
 exec 9>/run/sbp-auto.lock
 flock -n 9 || die "已有部署任务正在运行"
 
-log "2. 备份旧配置"
+log "2. 预检 GitHub Token 和 Gist"
+GIST_CHECK_CODE="$(curl -sS -o "$TMP/gist-check.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  "https://api.github.com/gists/$GIST_ID")"
+[[ "$GIST_CHECK_CODE" == 200 ]] || { cat "$TMP/gist-check.json"; die "读取 Gist 失败，HTTP $GIST_CHECK_CODE"; }
+
+USER_CHECK_CODE="$(curl -sS -o "$TMP/user-check.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  'https://api.github.com/user')"
+[[ "$USER_CHECK_CODE" == 200 ]] || { cat "$TMP/user-check.json"; die "Token 校验失败，HTTP $USER_CHECK_CODE"; }
+GIST_OWNER="$(jq -r '.owner.login // empty' "$TMP/gist-check.json")"
+TOKEN_OWNER="$(jq -r '.login // empty' "$TMP/user-check.json")"
+[[ -n "$GIST_OWNER" && -n "$TOKEN_OWNER" ]] || die "无法识别 GitHub 用户或 Gist 所有者"
+[[ "$GIST_OWNER" == "$TOKEN_OWNER" ]] || die "Token 用户 $TOKEN_OWNER 不是 Gist 所有者 $GIST_OWNER"
+echo "Token 用户：$TOKEN_OWNER"
+echo "Gist ID：$GIST_ID"
+
+log "3. 备份旧配置"
 mkdir -p "$BACKUP"
 items=()
 [[ -e "$SB_DIR" ]] && items+=(opt/sing-box)
@@ -81,7 +124,7 @@ items=()
 ROLLBACK=1
 systemctl stop "$SERVICE" >/dev/null 2>&1 || true
 
-log "3. 下载部署库并选择网络"
+log "4. 下载部署库并选择网络"
 curl -fL --retry 3 "$REPO_RAW/sing-box-plus.sh" -o "$TMP/library.sh"
 # 去掉文件最后的 menu 调用，只加载函数。
 sed -e 's/^stty erase.*/stty erase ^H 2>\/dev\/null || true/' \
@@ -121,7 +164,7 @@ export REALITY_SERVER ENABLE_WARP=false
 [[ -n "$OLD_SNI" && "$OLD_SNI" != "$REALITY_SERVER" ]] && rm -rf "$SB_DIR/cert"
 printf '使用 IPv%s：%s\nReality 目标：%s\n' "$LINK_MODE" "$SERVER_IP" "$REALITY_SERVER"
 
-log "4. 生成 9 个协议节点"
+log "5. 生成 9 个协议节点"
 if ((ROTATE)); then
   rm -f "$SB_DIR/creds.env" "$SB_DIR/ports.env" "$SB_DIR/env.conf"
   rm -rf "$SB_DIR/cert"
@@ -188,7 +231,7 @@ for p in "${UDP_PORTS[@]}"; do
   ss -H -lnu | awk -v p=":$p" '$4 ~ p"$"{ok=1} END{exit !ok}' || die "UDP 端口 $p 未监听"
 done
 
-log "5. Reality 本机回环自测"
+log "6. Reality 本机回环自测"
 load_creds
 TEST_SERVER="127.0.0.1"; ((LINK_MODE==6)) && TEST_SERVER="::1"
 TEST_PORT=10998
@@ -206,7 +249,7 @@ curl -fsS --max-time 15 --socks5-hostname "127.0.0.1:$TEST_PORT" \
 kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
 echo "Reality 自测通过"
 
-log "6. 生成并更新订阅"
+log "7. 生成并强制更新订阅"
 # 仅截取 print_links_grouped 输出中的直连 9 个链接。
 print_links_grouped "$LINK_MODE" | awk '
  /【直连节点（9）】/{on=1;next}
@@ -217,28 +260,43 @@ print_links_grouped "$LINK_MODE" | awk '
 base64 -w 0 "$SB_DIR/sub_plain.txt" >"$SB_DIR/sub.txt"
 chmod 600 "$SB_DIR/sub_plain.txt" "$SB_DIR/sub.txt"
 
-if ((NO_GIST==0)); then
-  [[ -n "${GH_TOKEN:-}" ]] || { read -rsp "请输入 GitHub Token（需要 Gists 写权限）: " GH_TOKEN </dev/tty; echo; }
-  [[ -n "$GH_TOKEN" ]] || die "Token 为空"
-  jq -n --rawfile p "$SB_DIR/sub_plain.txt" --rawfile b "$SB_DIR/sub.txt" \
-    '{files:{"sub_plain.txt":{content:$p},"sub.txt":{content:$b}}}' >"$TMP/payload.json"
-  code="$(curl -sS -o "$TMP/gist.json" -w '%{http_code}' -X PATCH \
-    -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' -H 'Content-Type: application/json' \
-    "https://api.github.com/gists/$GIST_ID" --data-binary @"$TMP/payload.json")"
-  [[ "$code" == 200 ]] || { cat "$TMP/gist.json"; die "Gist 更新失败，HTTP $code"; }
-  owner="$(jq -r '.owner.login' "$TMP/gist.json")"
-fi
+jq -n --rawfile p "$SB_DIR/sub_plain.txt" --rawfile b "$SB_DIR/sub.txt" \
+  '{files:{"sub_plain.txt":{content:$p},"sub.txt":{content:$b}}}' >"$TMP/payload.json"
+code="$(curl -sS -o "$TMP/gist.json" -w '%{http_code}' -X PATCH \
+  -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' -H 'Content-Type: application/json' \
+  "https://api.github.com/gists/$GIST_ID" --data-binary @"$TMP/payload.json")"
+[[ "$code" == 200 ]] || { cat "$TMP/gist.json"; die "Gist 更新失败，HTTP $code"; }
+GIST_OWNER="$(jq -r '.owner.login // empty' "$TMP/gist.json")"
+RAW_SUB="$(jq -r '.files["sub.txt"].raw_url // empty' "$TMP/gist.json")"
+RAW_PLAIN="$(jq -r '.files["sub_plain.txt"].raw_url // empty' "$TMP/gist.json")"
+[[ -n "$RAW_SUB" && -n "$RAW_PLAIN" ]] || die "GitHub 返回结果缺少 raw_url"
 
-log "7. 完成"
+verify_remote(){
+  local local_file="$1" raw_url="$2" name="$3" local_hash remote_hash try
+  local_hash="$(sha256sum "$local_file" | awk '{print $1}')"
+  for try in 1 2 3 4 5; do
+    curl -fLsS -H 'Cache-Control: no-cache' \
+      "${raw_url}?nocache=$(date +%s%N)" -o "$TMP/remote-$name" || true
+    remote_hash="$(sha256sum "$TMP/remote-$name" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ "$local_hash" == "$remote_hash" ]]; then
+      echo "$name 远程校验通过：$local_hash"
+      return 0
+    fi
+    sleep "$try"
+  done
+  die "$name 的 Gist 内容与本地不一致"
+}
+verify_remote "$SB_DIR/sub.txt" "$RAW_SUB" sub
+verify_remote "$SB_DIR/sub_plain.txt" "$RAW_PLAIN" plain
+
+log "8. 完成"
 cat "$SB_DIR/sub_plain.txt"
 echo
 printf '云防火墙 TCP：%s\n' "$(IFS=,; echo "${TCP_PORTS[*]}")"
 printf '云防火墙 UDP：%s\n' "$(IFS=,; echo "${UDP_PORTS[*]}")"
-if ((NO_GIST==0)); then
-  echo "Base64 订阅：https://gist.githubusercontent.com/$owner/$GIST_ID/raw/sub.txt"
-  echo "明文订阅：https://gist.githubusercontent.com/$owner/$GIST_ID/raw/sub_plain.txt"
-fi
+echo "Base64 订阅：https://gist.githubusercontent.com/$GIST_OWNER/$GIST_ID/raw/sub.txt"
+echo "明文订阅：https://gist.githubusercontent.com/$GIST_OWNER/$GIST_ID/raw/sub_plain.txt"
 echo "服务状态：systemctl status sing-box --no-pager"
 echo "备份目录：$BACKUP"
 ROLLBACK=0
