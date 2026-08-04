@@ -26,8 +26,8 @@ else
   exit 1
 fi
 
-start_line="$(grep -n '^systemctl daemon-reload$' "$BASE_FILE" | head -n1 | cut -d: -f1)"
-end_line="$(grep -n '^# 本地服务已验证；之后 Gist 失败不再回滚可用服务。$' "$BASE_FILE" | head -n1 | cut -d: -f1)"
+start_line="$(grep -n '^systemctl daemon-reload$' "$BASE_FILE" | sed -n '1p' | cut -d: -f1)"
+end_line="$(grep -n '^# 本地服务已验证；之后 Gist 失败不再回滚可用服务。$' "$BASE_FILE" | sed -n '1p' | cut -d: -f1)"
 
 if [[ -z "$start_line" || -z "$end_line" || "$start_line" -ge "$end_line" ]]; then
   echo "[ERROR] 无法定位基础脚本中的服务启动检查区块" >&2
@@ -122,6 +122,11 @@ wait_udp_port "$TUIC_PORT" sing-box.service
 PATCH
 
 tail -n +"$end_line" "$BASE_FILE" >>"$PATCHED_FILE"
+
+# With pipefail enabled, `command | head -n1` may return 141 when the producer
+# receives SIGPIPE after head exits. sed reads the full stream and avoids that.
+sed -i 's/| head -n1/| sed -n "1p"/g; s/| head -n 1/| sed -n "1p"/g' "$PATCHED_FILE"
+
 chmod 700 "$PATCHED_FILE"
 bash -n "$PATCHED_FILE"
 exec bash "$PATCHED_FILE" "$@"
