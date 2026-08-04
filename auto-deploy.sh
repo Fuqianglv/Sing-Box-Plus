@@ -2,50 +2,16 @@
 set -Eeuo pipefail
 umask 077
 
-# 稳定入口：不修改协议配置，不做额外 Reality 自测。
-# 仅把 GH_TOKEN / GIST_ID 传给原始 vps-deploy/deploy.sh。
+# 默认稳定入口：3 个 AnyTLS + SS AES + SS2022 + Hy2 + Hy2 OBFS + TUIC。
+# 已有 hybrid 部署只做原地迁移；新服务器自动完整部署。
 
-DEPLOY_URL="https://raw.githubusercontent.com/lvfuq/vps-deploy/main/deploy.sh"
-DEFAULT_GIST_ID="85a7d7b63d151e78558a4737aca3ce02"
+FINAL_COMMIT="da3a14a192b96f20ee71f6b09f22d67f851b742f"
+FINAL_URL="https://raw.githubusercontent.com/Fuqianglv/Sing-Box-Plus/${FINAL_COMMIT}/hybrid-deploy-v4.sh"
+TMP="$(mktemp /tmp/auto-deploy.XXXXXX.sh)"
 
-GH_TOKEN="${GH_TOKEN:-${1:-}}"
-GIST_ID="${GIST_ID:-${2:-$DEFAULT_GIST_ID}}"
-
-[[ ${EUID:-$(id -u)} -eq 0 ]] || {
-  echo "[ERROR] 请用 root 执行" >&2
-  exit 1
-}
-
-if [[ -z "$GH_TOKEN" ]]; then
-  read -rsp "请输入 GitHub Token（需要 Gists 写权限）: " GH_TOKEN </dev/tty
-  echo
-fi
-
-[[ -n "$GH_TOKEN" ]] || {
-  echo "[ERROR] GH_TOKEN 为空" >&2
-  exit 1
-}
-
-[[ "$GIST_ID" =~ ^[0-9a-fA-F]{20,64}$ ]] || {
-  echo "[ERROR] GIST_ID 格式不正确：$GIST_ID" >&2
-  exit 1
-}
-
-if ! command -v curl >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y --no-install-recommends curl ca-certificates
-fi
-
-export GH_TOKEN GIST_ID
-
-TMP="$(mktemp /tmp/vps-deploy.XXXXXX.sh)"
-cleanup(){
-  rm -f "$TMP"
-  unset GH_TOKEN
-}
+cleanup(){ rm -f "$TMP"; }
 trap cleanup EXIT
 
-curl -fL --retry 3 --connect-timeout 15 "$DEPLOY_URL" -o "$TMP"
+curl -fL --retry 3 --retry-all-errors --connect-timeout 15 "$FINAL_URL" -o "$TMP"
 bash -n "$TMP"
-bash "$TMP"
+exec bash "$TMP" "$@"
