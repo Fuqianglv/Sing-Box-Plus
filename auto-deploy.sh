@@ -2,30 +2,50 @@
 set -Eeuo pipefail
 umask 077
 
-# 固定读取上一版完整部署器，并在执行前应用 Xray REALITY 新版字段兼容修复。
-# Xray 新版客户端 realitySettings 使用 password 保存服务端公钥，
-# 旧字段 publicKey 可能导致服务端记录 processed invalid connection。
+# 稳定入口：不修改协议配置，不做额外 Reality 自测。
+# 仅把 GH_TOKEN / GIST_ID 传给原始 vps-deploy/deploy.sh。
 
-BASE_COMMIT="9a275359cf5fe29d8349f6f66b1bca6df92d574f"
-BASE_URL="https://raw.githubusercontent.com/Fuqianglv/Sing-Box-Plus/${BASE_COMMIT}/auto-deploy.sh"
-TMP="$(mktemp /tmp/auto-deploy-fixed.XXXXXX)"
+DEPLOY_URL="https://raw.githubusercontent.com/lvfuq/vps-deploy/main/deploy.sh"
+DEFAULT_GIST_ID="85a7d7b63d151e78558a4737aca3ce02"
 
+GH_TOKEN="${GH_TOKEN:-${1:-}}"
+GIST_ID="${GIST_ID:-${2:-$DEFAULT_GIST_ID}}"
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || {
+  echo "[ERROR] 请用 root 执行" >&2
+  exit 1
+}
+
+if [[ -z "$GH_TOKEN" ]]; then
+  read -rsp "请输入 GitHub Token（需要 Gists 写权限）: " GH_TOKEN </dev/tty
+  echo
+fi
+
+[[ -n "$GH_TOKEN" ]] || {
+  echo "[ERROR] GH_TOKEN 为空" >&2
+  exit 1
+}
+
+[[ "$GIST_ID" =~ ^[0-9a-fA-F]{20,64}$ ]] || {
+  echo "[ERROR] GIST_ID 格式不正确：$GIST_ID" >&2
+  exit 1
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y --no-install-recommends curl ca-certificates
+fi
+
+export GH_TOKEN GIST_ID
+
+TMP="$(mktemp /tmp/vps-deploy.XXXXXX.sh)"
 cleanup(){
   rm -f "$TMP"
+  unset GH_TOKEN
 }
 trap cleanup EXIT
 
-if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 3 --connect-timeout 15 "$BASE_URL" -o "$TMP"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$TMP" "$BASE_URL"
-else
-  echo "[ERROR] 系统缺少 curl/wget" >&2
-  exit 1
-fi
-
-# Xray 当前 REALITY 客户端字段：password = 服务端公钥。
-sed -i 's/publicKey:\$p/password:\$p/g' "$TMP"
-
+curl -fL --retry 3 --connect-timeout 15 "$DEPLOY_URL" -o "$TMP"
 bash -n "$TMP"
-bash "$TMP" "$@"
+bash "$TMP"
