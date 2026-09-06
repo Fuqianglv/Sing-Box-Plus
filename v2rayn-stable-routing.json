@@ -1,0 +1,83 @@
+[
+  {
+    "remarks": "Block proxied QUIC / HTTP3",
+    "outboundTag": "block",
+    "port": "443",
+    "network": "udp",
+    "enabled": true
+  },
+  {
+    "remarks": "Direct private IP ranges",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct private domains",
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct banking and payment domains",
+    "outboundTag": "direct",
+    "domain": [
+      "domain:icbc.com.cn",
+      "domain:abchina.com",
+      "domain:boc.cn",
+      "domain:bankofchina.com",
+      "domain:ccb.com",
+      "domain:cmbchina.com",
+      "domain:bankcomm.com",
+      "domain:psbc.com",
+      "domain:cib.com.cn",
+      "domain:spdb.com.cn",
+      "domain:cmbc.com.cn",
+      "domain:cebbank.com",
+      "domain:ecitic.com",
+      "domain:cgbchina.com.cn",
+      "domain:hxb.com.cn",
+      "domain:pingan.com",
+      "domain:bankofbeijing.com.cn",
+      "domain:bankofshanghai.com",
+      "domain:webank.com",
+      "domain:mybank.cn",
+      "domain:unionpay.com",
+      "domain:chinaunionpay.com",
+      "domain:cloudquickpass.com",
+      "domain:alipay.com",
+      "domain:alipayobjects.com",
+      "domain:alipaydev.com",
+      "domain:weixin.qq.com",
+      "domain:wechat.com",
+      "domain:tenpay.com"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct mainland China domains",
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:cn"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct mainland China IP ranges",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:cn"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Final proxy",
+    "outboundTag": "proxy",
+    "port": "0-65535",
+    "enabled": true
+  }
+]
